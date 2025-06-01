@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools >= 80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "i2cs"
+version = "0.0.1"
+dependencies = [
+    "smbus2",
+]
+requires-python = ">= 3.11"
+authors = [
+    {name = "Vasili Vasilyeu", email = "weekspender@gmail.com"},
+]
+description = "I2C Sensors communication library"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["i2c", "sensors", "temperature", "pressure", "humidity", "light", "SPL07-003", "ENS210", "APDS-9999"]
+classifiers = [
+    "Development Status :: 1 - Planning",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Embedded Systems",
+    "Programming Language :: Python",
+    "Operating System :: OS Independent",
+]
+
+[project.scripts]
+i2cs-cli = "i2cs.cli:main"
