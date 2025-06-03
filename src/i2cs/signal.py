@@ -19,4 +19,4 @@ class Signal:
         return self.__signaled.is_set()
 
     def wait(self, timeout=None):
-        self.__signaled.wait(timeout)
+        return self.__signaled.wait(timeout)
