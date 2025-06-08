@@ -22,27 +22,26 @@ def main():
     # ps_int = None
     led = gpiozero.LED(21)
 
-    ps = Spl07003(ALTERNATE_ADDRESS)
     with i2c() as bus:
-        # ps.reset(bus)
-        ps.read_coef(bus)
+        with Spl07003(bus, ALTERNATE_ADDRESS) as ps:
+            # ps.reset(bus)
+            calibration = ps.read_coef()
+            print(f'{calibration}')
 
-        print(f'{ps.calibration}')
+            ps.write_cfg()
 
-        ps.write_cfg(bus)
-
-        # measure = ps.measure_all(bus)
-        count = 0
-        while True: # and count < 3:
-            # p, t = next(measure)
-            led.on()
-            try:
-                p, t = ps.measure(bus, ps_int.wait_for_active)
-            finally:
-                led.off()
-            count += 1
-            print(f'{count}: Temp: {t:0.1f} C, Pressure: {p/100:0.1f} mbar')
-            if s.wait(1):
-                break
+            # measure = ps.measure_all()
+            count = 0
+            while True: # and count < 3:
+                # p, t = next(measure)
+                led.on()
+                try:
+                    p, t = ps.measure(ps_int.wait_for_active)
+                finally:
+                    led.off()
+                count += 1
+                print(f'{count}: Temp: {t:0.1f} C, Pressure: {p/100:0.1f} mbar')
+                if s.wait(1):
+                    break
 
     return 0

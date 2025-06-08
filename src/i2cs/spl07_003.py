@@ -4,15 +4,13 @@ import dataclasses
 import time
 
 from .error import Error
+from .device import Block, Device
 
 DEFAULT_ADDRESS=0x77
 ALTERNATE_ADDRESS=0x76
 
-_REG_BLOCK_PRS=0x00
-_REG_BLOCK_SIZE_PRS=3
-
-_REG_BLOCK_TMP=0x03
-_REG_BLOCK_SIZE_TMP=3
+_REG_BLOCK_PRS=Block(0x00, 3)
+_REG_BLOCK_TMP=Block(0x03, 3)
 
 _REG_PRS_CFG=0x06
 _REG_TMP_CFG=0x07
@@ -22,8 +20,7 @@ _REG_INT_STS=0x0a
 _REG_FIFO_STS=0x0b
 _REG_RESET=0x0c
 
-_REG_BLOCK_COEF=0x10
-_REG_BLOCK_SIZE_COEF=21
+_REG_BLOCK_COEF=Block(0x10, 21)
 
 _MEAS_CTRL_VALUES = {
     0b000: 'Idle',
@@ -45,7 +42,7 @@ def _u_to_s(u, bits):
 class Calibration: # pylint: disable=too-many-instance-attributes
     """ The class stores the calibration coefficients of SPL07-003 sensor """
 
-    block: list[int] = _REG_BLOCK_SIZE_COEF * (0,)
+    block: list[int] = _REG_BLOCK_COEF.zero()
     c0: int = 0
     c1: int = 0
     c00: int = 0
@@ -60,9 +57,9 @@ class Calibration: # pylint: disable=too-many-instance-attributes
 
     def __init__(self, block=None):
         if block is not None:
-            block = tuple(block[:_REG_BLOCK_SIZE_COEF])
-            if len(block) < _REG_BLOCK_SIZE_COEF:
-                block += (_REG_BLOCK_SIZE_COEF - len(self.block)) * (0,)
+            block = tuple(block[:_REG_BLOCK_COEF.length])
+            if len(block) < _REG_BLOCK_COEF.length:
+                block += (_REG_BLOCK_COEF.length - len(self.block)) * (0,)
             object.__setattr__(self, 'block', block)
 
         object.__setattr__(self, 'c0',
@@ -119,16 +116,11 @@ class Calibration: # pylint: disable=too-many-instance-attributes
         pt_corr = t*(self.c01 + self.c11*p + self.c21*p2 + self.c31*p3)
         return self.c00 + self.c10*p + self.c20*p2 + self.c30*p3 + self.c40*p4 + pt_corr
 
-class Spl07003:
+class Spl07003(Device):
     """ The class provides access to the basic functionality of SPL07-003 through I2C bus """
-    def __init__(self, address=DEFAULT_ADDRESS):
-        self.__address = address
+    def __init__(self, bus, address=DEFAULT_ADDRESS):
+        super().__init__(bus, address)
         self.__c = Calibration()
-
-    @property
-    def calibration(self):
-        """ Returns the calibration coefficients of the sensor """
-        return self.__c
 
     def __str_meas_cfg(self, cfg):
         coef_rdy = 'Yes' if cfg & 0x80 else 'No'
@@ -151,13 +143,13 @@ class Spl07003:
         empty = 'Yes' if sts & 0x2 else 'No'
         return f'FIFO_FULL: {full}, FIFO_EMPTY: {empty}'
 
-    def __wait_for_sensor(self, bus, mask):
-        cfg = bus.read_byte(self.__address, _REG_MEAS_CFG)
+    def __wait_for_sensor(self, mask):
+        # cfg = self.read(_REG_MEAS_CFG)
         # \tf'W: {self.__str_meas_cfg(cfg)} (0x{mask:02x})')
         count = 0
         while count < 10:
             count += 1
-            cfg = bus.read_byte(self.__address, _REG_MEAS_CFG)
+            cfg = self.read(_REG_MEAS_CFG)
             # print(f'W {count}: {self.__str_meas_cfg(cfg)} (0x{mask:02x})')
             if cfg & mask == mask:
                 break
@@ -166,31 +158,26 @@ class Spl07003:
         else:
             raise Error("Timeout while waiting for sensor to be ready")
 
-    def reset(self, bus):
+    def reset(self):
         """ Resets the sensor """
+        self.write(_REG_RESET, 0x09)
+        self.__wait_for_sensor(0xc0)
 
-        bus.write_byte_data(self.__address, _REG_RESET, 0x09)
-        self.__wait_for_sensor(bus, 0xc0)
-
-    def read_coef(self, bus):
+    def read_coef(self):
         """ Reads the calibration coefficients from the sensor """
+        self.__c = Calibration(self.read(_REG_BLOCK_COEF))
+        return self.__c
 
-        self.__c = Calibration(
-                bus.read_i2c_block_data(self.__address, _REG_BLOCK_COEF, _REG_BLOCK_SIZE_COEF)
-            )
-
-    def write_cfg(self, bus):
+    def write_cfg(self):
         """ Writes the configuration of FIFO, interuppts, pressure and temperature measurements """
+        self.write(_REG_PRS_CFG, 0b00000100)
+        self.write(_REG_TMP_CFG, 0b00000100)
+        self.write(_REG_CFG_REG, 0b00111100)
 
-        bus.write_byte_data(self.__address, _REG_PRS_CFG, 0b00000100)
-        bus.write_byte_data(self.__address, _REG_TMP_CFG, 0b00000100)
-        bus.write_byte_data(self.__address, _REG_CFG_REG, 0b00111100)
-
-    def measure_all(self, bus):
+    def measure_all(self):
         """ Runs continuous pressure and temperature measurements """
-
-        self.__wait_for_sensor(bus, 0b01000000)
-        bus.write_byte_data(self.__address, _REG_MEAS_CFG, 0b111)
+        self.__wait_for_sensor(0b01000000)
+        self.write(_REG_MEAS_CFG, 0b111)
 
         while True:
             time.sleep(0.001)
@@ -201,13 +188,11 @@ class Spl07003:
                 time.sleep(0.001)
                 count += 1
 
-                cfg = bus.read_byte(self.__address, _REG_MEAS_CFG)
+                cfg = self.read(_REG_MEAS_CFG)
                 print(f'P+T {count}: {self.__str_meas_cfg(cfg)}')
-                print(f'FIFO_STS: 0x{bus.read_byte(self.__address, _REG_FIFO_STS):02x}')
+                print(f'FIFO_STS: 0x{self.read(_REG_FIFO_STS):02x}')
                 if not p_rdy and (cfg & 0x50 == 0x50):
-                    data = bus.read_i2c_block_data(
-                            self.__address, _REG_BLOCK_PRS, _REG_BLOCK_SIZE_PRS
-                        )
+                    data = self.read(_REG_BLOCK_PRS)
                     # print(f'PRS_BX: {" ".join(f"{x:02x}" for x in data)}')
                     p_raw_u = (data[0] << 16) | (data[1] << 8) | data[2]
                     # print(f'P_raw: 0x{p_raw_u:06x}')
@@ -218,9 +203,7 @@ class Spl07003:
                     p_rdy = True
 
                 if not t_rdy and (cfg & 0x60 == 0x60):
-                    data = bus.read_i2c_block_data(
-                            self.__address, _REG_BLOCK_TMP, _REG_BLOCK_SIZE_TMP
-                        )
+                    data = self.read(_REG_BLOCK_TMP)
                     # print(f'TMP_BX: {" ".join(f"{x:02x}" for x in data)}')
                     t_raw_u = (data[0] << 16) | (data[1] << 8) | data[2]
                     # print(f'T_raw: 0x{t_raw_u:06x}')
@@ -238,28 +221,28 @@ class Spl07003:
 
             yield self.__c.p(p_raw_sc, t_raw_sc), self.__c.t(t_raw_sc)
 
-    def __measure_pressure(self, bus, wait):
-        self.__wait_for_sensor(bus, 0b01000000)
-        bus.write_byte_data(self.__address, _REG_MEAS_CFG, 0b001)
+    def __measure_pressure(self, wait):
+        self.__wait_for_sensor(0b01000000)
+        self.write(_REG_MEAS_CFG, 0b001)
 
         if wait:
             start = time.monotonic_ns()
             if not wait(0.3):
                 raise Error("Timeout while measuring pressure")
             print(f'P ({(time.monotonic_ns() - start)/1e6} ms)\n\t'
-                f'MEAS_CFG: {self.__str_meas_cfg(bus.read_byte(self.__address, _REG_MEAS_CFG))}\n\t'
-                f'INT_STS:  {self.__str_int_sts(bus.read_byte(self.__address, _REG_INT_STS))}\n\t'
-                f'FIFO_STS: {self.__str_fifo_sts(bus.read_byte(self.__address, _REG_FIFO_STS))}')
+                f'MEAS_CFG: {self.__str_meas_cfg(self.read(_REG_MEAS_CFG))}\n\t'
+                f'INT_STS:  {self.__str_int_sts(self.read(_REG_INT_STS))}\n\t'
+                f'FIFO_STS: {self.__str_fifo_sts(self.read(_REG_FIFO_STS))}')
         else:
             count = 0
             while count < 10:
                 time.sleep(0.03)
                 count += 1
-                cfg = bus.read_byte(self.__address, _REG_MEAS_CFG)
+                cfg = self.read(_REG_MEAS_CFG)
                 # print(f'P {count}: {self.__str_meas_cfg(cfg)}')
                 if cfg & 0x10:
-                    int_sts = bus.read_byte(self.__address, _REG_INT_STS)
-                    fifo_sts = bus.read_byte(self.__address, _REG_FIFO_STS)
+                    int_sts = self.read(_REG_INT_STS)
+                    fifo_sts = self.read(_REG_FIFO_STS)
                     print(f'P ({count})\n\t'
                         f'MEAS_CFG: {self.__str_meas_cfg(cfg)}\n\t'
                         f'INT_STS:  {self.__str_int_sts(int_sts)}\n\t'
@@ -268,31 +251,31 @@ class Spl07003:
             else:
                 raise Error("Timeout while measuring pressure")
 
-        data = bus.read_i2c_block_data(self.__address, _REG_BLOCK_PRS, _REG_BLOCK_SIZE_PRS)
+        data = self.read(_REG_BLOCK_PRS)
         return _u_to_s((data[0] << 16) | (data[1] << 8) | data[2], 24)/253952
 
-    def __measure_temperature(self, bus, wait):
-        self.__wait_for_sensor(bus, 0b01000000)
-        bus.write_byte_data(self.__address, _REG_MEAS_CFG, 0b010)
+    def __measure_temperature(self, wait):
+        self.__wait_for_sensor(0b01000000)
+        self.write(_REG_MEAS_CFG, 0b010)
 
         if wait:
             start = time.monotonic_ns()
             if not wait(0.3):
                 raise Error("Timeout while measuring pressure")
             print(f'T ({(time.monotonic_ns() - start)/1e6} ms)\n\t'
-                f'MEAS_CFG: {self.__str_meas_cfg(bus.read_byte(self.__address, _REG_MEAS_CFG))}\n\t'
-                f'INT_STS:  {self.__str_int_sts(bus.read_byte(self.__address, _REG_INT_STS))}\n\t'
-                f'FIFO_STS: {self.__str_fifo_sts(bus.read_byte(self.__address, _REG_FIFO_STS))}')
+                f'MEAS_CFG: {self.__str_meas_cfg(self.read(_REG_MEAS_CFG))}\n\t'
+                f'INT_STS:  {self.__str_int_sts(self.read(_REG_INT_STS))}\n\t'
+                f'FIFO_STS: {self.__str_fifo_sts(self.read(_REG_FIFO_STS))}')
         else:
             count = 0
             while count < 10:
                 time.sleep(0.03)
                 count += 1
-                cfg = bus.read_byte(self.__address, _REG_MEAS_CFG)
+                cfg = self.read(_REG_MEAS_CFG)
                 # print(f'T {count}: {self.__str_meas_cfg(cfg)}')
                 if cfg & 0x20:
-                    int_sts = bus.read_byte(self.__address, _REG_INT_STS)
-                    fifo_sts = bus.read_byte(self.__address, _REG_FIFO_STS)
+                    int_sts = self.read(_REG_INT_STS)
+                    fifo_sts = self.read(_REG_FIFO_STS)
                     print(f'P ({count})\n\t'
                         f'MEAS_CFG: {self.__str_meas_cfg(cfg)}\n\t'
                         f'INT_STS:  {self.__str_int_sts(int_sts)}\n\t'
@@ -301,12 +284,11 @@ class Spl07003:
             else:
                 raise Error("Timeout while measuring temperature")
 
-        data = bus.read_i2c_block_data(self.__address, _REG_BLOCK_TMP, _REG_BLOCK_SIZE_TMP)
+        data = self.read(_REG_BLOCK_TMP)
         return _u_to_s((data[0] << 16) | (data[1] << 8) | data[2], 24)/253952
 
-    def measure(self, bus, wait=None):
+    def measure(self, wait=None):
         """ Measures pressure and temperature """
-
-        p_raw_sc = self.__measure_pressure(bus, wait)
-        t_raw_sc = self.__measure_temperature(bus, wait)
+        p_raw_sc = self.__measure_pressure(wait)
+        t_raw_sc = self.__measure_temperature(wait)
         return self.__c.p(p_raw_sc, t_raw_sc), self.__c.t(t_raw_sc)
