@@ -2,6 +2,7 @@
 
 import dataclasses
 import time
+import errno
 
 from .error import Error
 from .device import Block, Device
@@ -32,6 +33,22 @@ _MEAS_CTRL_VALUES = {
     0b110: 'T cont.',
     0b111: 'P+T cont.'
 }
+
+_REG_CFG_REG_MEAS_CTRL_NA = 0x3
+_REG_CFG_REG_MEAS_CTRL_MASK = 0x07
+_REG_CFG_REG_PRS_RDY = 0x10
+_REG_CFG_REG_TMP_RDY = 0x20
+_REG_CFG_REG_SENSOR_RDY = 0x40
+_REG_CFG_REG_COEF_RDY = 0x80
+
+_REG_CFG_REG_DEV_RDY = _REG_CFG_REG_SENSOR_RDY|_REG_CFG_REG_COEF_RDY
+_REG_CFG_REG_DEV_RDY_MASK = _REG_CFG_REG_DEV_RDY|_REG_CFG_REG_MEAS_CTRL_MASK
+
+_REG_CFG_REG_PRS_DONE = _REG_CFG_REG_PRS_RDY|_REG_CFG_REG_SENSOR_RDY
+_REG_CFG_REG_PRS_DONE_MASK = _REG_CFG_REG_PRS_DONE|_REG_CFG_REG_MEAS_CTRL_MASK
+
+_REG_CFG_REG_TMP_DONE = _REG_CFG_REG_TMP_RDY|_REG_CFG_REG_SENSOR_RDY
+_REG_CFG_REG_TMP_DONE_MASK = _REG_CFG_REG_TMP_DONE|_REG_CFG_REG_MEAS_CTRL_MASK
 
 def _u_to_s(u, bits):
     """ Convert 2's complement integer to signed number """
@@ -143,40 +160,68 @@ class Spl07003(Device):
         empty = 'Yes' if sts & 0x2 else 'No'
         return f'FIFO_FULL: {full}, FIFO_EMPTY: {empty}'
 
-    def __wait_for_sensor(self, mask):
-        # cfg = self.read(_REG_MEAS_CFG)
-        # \tf'W: {self.__str_meas_cfg(cfg)} (0x{mask:02x})')
-        count = 0
-        while count < 10:
-            count += 1
-            cfg = self.read(_REG_MEAS_CFG)
-            # print(f'W {count}: {self.__str_meas_cfg(cfg)} (0x{mask:02x})')
-            if cfg & mask == mask:
-                break
+    def __read_cfg_safe(self):
+        try:
+            return self.read(_REG_MEAS_CFG), False
+        except OSError as e:
+            if e.errno == errno.EIO:
+                return _REG_CFG_REG_MEAS_CTRL_NA, True
+            raise
 
-            time.sleep(0.001)
+    def __wait_for_sensor(self, value, mask=None, timeout=None, step=0.0005):
+        now = time.monotonic_ns()
+        limit = now
+        if timeout is not None:
+            limit += timeout*1e9
+
+        if mask is None:
+            mask_str = f' (0x{value:02x})'
+            mask = value
         else:
-            raise Error("Timeout while waiting for sensor to be ready")
+            mask_str = f' (0x{value:02x}:0x{mask:02x})'
+
+        count = 0
+        while timeout is None or now <= limit:
+            time.sleep(step)
+            count += 1
+
+            cfg, error = self.__read_cfg_safe()
+            if error:
+                print(f'W {count}: I/O error - {self.__str_meas_cfg(cfg)}{mask_str}')
+            else:
+                print(f'W {count}: {self.__str_meas_cfg(cfg)}{mask_str}')
+            if cfg & mask == value:
+                return True
+
+            now = time.monotonic_ns()
+
+        return False
 
     def reset(self):
         """ Resets the sensor """
         self.write(_REG_RESET, 0x09)
-        self.__wait_for_sensor(0xc0)
 
     def read_coef(self):
         """ Reads the calibration coefficients from the sensor """
+        start = time.monotonic_ns()
+        if not self.__wait_for_sensor(_REG_CFG_REG_COEF_RDY, timeout=0.1, step=0.002):
+            raise Error("Timeout while reading calibration coefficients")
+        print(f'CC ({(time.monotonic_ns() - start)/1e6} ms)')
+
         self.__c = Calibration(self.read(_REG_BLOCK_COEF))
         return self.__c
 
     def write_cfg(self):
         """ Writes the configuration of FIFO, interuppts, pressure and temperature measurements """
-        self.write(_REG_PRS_CFG, 0b00000100)
-        self.write(_REG_TMP_CFG, 0b00000100)
-        self.write(_REG_CFG_REG, 0b00111100)
+        self.write(_REG_PRS_CFG, 0b00000001)
+        self.write(_REG_TMP_CFG, 0b00000000)
+        self.write(_REG_CFG_REG, 0b00110000)
 
     def measure_all(self):
         """ Runs continuous pressure and temperature measurements """
-        self.__wait_for_sensor(0b01000000)
+        if not self.__wait_for_sensor(_REG_CFG_REG_SENSOR_RDY, timeout=0.1):
+            raise Error("Timeout while waiting for sensor to be ready for measurements")
+
         self.write(_REG_MEAS_CFG, 0b111)
 
         while True:
@@ -221,71 +266,52 @@ class Spl07003(Device):
 
             yield self.__c.p(p_raw_sc, t_raw_sc), self.__c.t(t_raw_sc)
 
+    def __wait_for_prs(self, timeout=None):
+        return self.__wait_for_sensor(
+                _REG_CFG_REG_PRS_RDY,
+                timeout=timeout, step=0.0052
+            )
+
+    def __wait_for_tmp(self, timeout=None):
+        return self.__wait_for_sensor(
+                _REG_CFG_REG_TMP_RDY,
+                timeout=timeout, step=0.0036
+            )
+
     def __measure_pressure(self, wait):
-        self.__wait_for_sensor(0b01000000)
+        print('Sensor is ready for pressure measurement, starting...')
         self.write(_REG_MEAS_CFG, 0b001)
 
-        if wait:
-            start = time.monotonic_ns()
-            if not wait(0.3):
-                raise Error("Timeout while measuring pressure")
-            print(f'P ({(time.monotonic_ns() - start)/1e6} ms)\n\t'
-                f'MEAS_CFG: {self.__str_meas_cfg(self.read(_REG_MEAS_CFG))}\n\t'
-                f'INT_STS:  {self.__str_int_sts(self.read(_REG_INT_STS))}\n\t'
-                f'FIFO_STS: {self.__str_fifo_sts(self.read(_REG_FIFO_STS))}')
-        else:
-            count = 0
-            while count < 10:
-                time.sleep(0.03)
-                count += 1
-                cfg = self.read(_REG_MEAS_CFG)
-                # print(f'P {count}: {self.__str_meas_cfg(cfg)}')
-                if cfg & 0x10:
-                    int_sts = self.read(_REG_INT_STS)
-                    fifo_sts = self.read(_REG_FIFO_STS)
-                    print(f'P ({count})\n\t'
-                        f'MEAS_CFG: {self.__str_meas_cfg(cfg)}\n\t'
-                        f'INT_STS:  {self.__str_int_sts(int_sts)}\n\t'
-                        f'FIFO_STS: {self.__str_fifo_sts(fifo_sts)}')
-                    break
-            else:
-                raise Error("Timeout while measuring pressure")
+        if not wait:
+            wait = self.__wait_for_prs
+
+        start = time.monotonic_ns()
+        wait(0.5)
+
+        print(f'P ({(time.monotonic_ns() - start)/1e6} ms)\n\t'
+            f'INT_STS:  {self.__str_int_sts(self.read(_REG_INT_STS))}\n\t'
+            f'FIFO_STS: {self.__str_fifo_sts(self.read(_REG_FIFO_STS))}')
 
         data = self.read(_REG_BLOCK_PRS)
-        return _u_to_s((data[0] << 16) | (data[1] << 8) | data[2], 24)/253952
+        return _u_to_s((data[0] << 16) | (data[1] << 8) | data[2], 24)/1572864
 
     def __measure_temperature(self, wait):
-        self.__wait_for_sensor(0b01000000)
+        print('Sensor is ready for temperature measurement, starting...')
         self.write(_REG_MEAS_CFG, 0b010)
 
-        if wait:
-            start = time.monotonic_ns()
-            if not wait(0.3):
-                raise Error("Timeout while measuring pressure")
-            print(f'T ({(time.monotonic_ns() - start)/1e6} ms)\n\t'
-                f'MEAS_CFG: {self.__str_meas_cfg(self.read(_REG_MEAS_CFG))}\n\t'
-                f'INT_STS:  {self.__str_int_sts(self.read(_REG_INT_STS))}\n\t'
-                f'FIFO_STS: {self.__str_fifo_sts(self.read(_REG_FIFO_STS))}')
-        else:
-            count = 0
-            while count < 10:
-                time.sleep(0.03)
-                count += 1
-                cfg = self.read(_REG_MEAS_CFG)
-                # print(f'T {count}: {self.__str_meas_cfg(cfg)}')
-                if cfg & 0x20:
-                    int_sts = self.read(_REG_INT_STS)
-                    fifo_sts = self.read(_REG_FIFO_STS)
-                    print(f'P ({count})\n\t'
-                        f'MEAS_CFG: {self.__str_meas_cfg(cfg)}\n\t'
-                        f'INT_STS:  {self.__str_int_sts(int_sts)}\n\t'
-                        f'FIFO_STS: {self.__str_fifo_sts(fifo_sts)}')
-                    break
-            else:
-                raise Error("Timeout while measuring temperature")
+        if not wait:
+            wait = self.__wait_for_tmp
+
+        start = time.monotonic_ns()
+        if not wait(0.3):
+            raise Error("Timeout while measuring pressure")
+
+        print(f'T ({(time.monotonic_ns() - start)/1e6} ms)\n\t'
+            f'INT_STS:  {self.__str_int_sts(self.read(_REG_INT_STS))}\n\t'
+            f'FIFO_STS: {self.__str_fifo_sts(self.read(_REG_FIFO_STS))}')
 
         data = self.read(_REG_BLOCK_TMP)
-        return _u_to_s((data[0] << 16) | (data[1] << 8) | data[2], 24)/253952
+        return _u_to_s((data[0] << 16) | (data[1] << 8) | data[2], 24)/524288
 
     def measure(self, wait=None):
         """ Measures pressure and temperature """
