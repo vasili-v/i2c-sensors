@@ -6,7 +6,7 @@ import gpiozero
 
 from .signal import Signal
 from .bus import i2c
-from .spl07_003 import Spl07003, DEFAULT_ADDRESS
+from .spl07_003 import Spl07003, DEFAULT_ADDRESS, Oversampling
 
 def make_args_paraser():
     """ Creates an argument parser """
@@ -22,6 +22,22 @@ def make_args_paraser():
             '--pressure-interrupt', type=int,
             help='GPIO pin number for pressure interrupt (default: poll for data)',
             metavar='PIN'
+        )
+
+    parser.add_argument(
+            '--pressure-prs-oversampling', type=lambda x: Oversampling[x],
+            choices=list(Oversampling), default=Oversampling.X16,
+            help= 'Oversampling rate for pressure measurement by pressure sensor (default: ' \
+                 f'{Oversampling.X16.name})',
+            metavar='RATE'
+        )
+
+    parser.add_argument(
+            '--pressure-tmp-oversampling', type=lambda x: Oversampling[x],
+            choices=list(Oversampling), default=Oversampling.X1,
+            help= 'Oversampling rate for temperature measurement by pressure sensor (default: ' \
+                 f'{Oversampling.X1.name})',
+            metavar='RATE'
         )
 
     return parser
@@ -45,7 +61,10 @@ def main():
             calibration = ps.read_coef()
             print(f'{calibration}')
 
-            ps.write_cfg()
+            ps.write_cfg(
+                    args.pressure_prs_oversampling, args.pressure_tmp_oversampling,
+                    wait is not None
+                )
 
             count = 0
             while True:

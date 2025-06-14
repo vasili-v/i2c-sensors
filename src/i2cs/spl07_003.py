@@ -1,6 +1,7 @@
 """ The submodule provides a class for the I2C interface of SPL07-003 digital pressure sensor """
 
 import dataclasses
+import enum
 import time
 import errno
 
@@ -23,6 +24,8 @@ _REG_RESET=0x0c
 
 _REG_BLOCK_COEF=Block(0x10, 21)
 
+_REG_PT_CFG_PRC_MASK = 0x0f
+
 _MEAS_CTRL_VALUES = {
     0b000: 'Idle',
     0b001: 'P',
@@ -34,21 +37,64 @@ _MEAS_CTRL_VALUES = {
     0b111: 'P+T cont.'
 }
 
-_REG_CFG_REG_MEAS_CTRL_NA = 0x3
-_REG_CFG_REG_MEAS_CTRL_MASK = 0x07
-_REG_CFG_REG_PRS_RDY = 0x10
-_REG_CFG_REG_TMP_RDY = 0x20
-_REG_CFG_REG_SENSOR_RDY = 0x40
-_REG_CFG_REG_COEF_RDY = 0x80
+_REG_MEAS_CFG_MEAS_CTRL_NA = 0x3
+_REG_MEAS_CFG_MEAS_CTRL_MASK = 0x07
+_REG_MEAS_CFG_PRS_RDY = 0x10
+_REG_MEAS_CFG_TMP_RDY = 0x20
+_REG_MEAS_CFG_SENSOR_RDY = 0x40
+_REG_MEAS_CFG_COEF_RDY = 0x80
 
-_REG_CFG_REG_DEV_RDY = _REG_CFG_REG_SENSOR_RDY|_REG_CFG_REG_COEF_RDY
-_REG_CFG_REG_DEV_RDY_MASK = _REG_CFG_REG_DEV_RDY|_REG_CFG_REG_MEAS_CTRL_MASK
+_REG_MEAS_CFG_DEV_RDY = _REG_MEAS_CFG_SENSOR_RDY|_REG_MEAS_CFG_COEF_RDY
+_REG_MEAS_CFG_DEV_RDY_MASK = _REG_MEAS_CFG_DEV_RDY|_REG_MEAS_CFG_MEAS_CTRL_MASK
 
-_REG_CFG_REG_PRS_DONE = _REG_CFG_REG_PRS_RDY|_REG_CFG_REG_SENSOR_RDY
-_REG_CFG_REG_PRS_DONE_MASK = _REG_CFG_REG_PRS_DONE|_REG_CFG_REG_MEAS_CTRL_MASK
+_REG_MEAS_CFG_PRS_DONE = _REG_MEAS_CFG_PRS_RDY|_REG_MEAS_CFG_SENSOR_RDY
+_REG_MEAS_CFG_PRS_DONE_MASK = _REG_MEAS_CFG_PRS_DONE|_REG_MEAS_CFG_MEAS_CTRL_MASK
 
-_REG_CFG_REG_TMP_DONE = _REG_CFG_REG_TMP_RDY|_REG_CFG_REG_SENSOR_RDY
-_REG_CFG_REG_TMP_DONE_MASK = _REG_CFG_REG_TMP_DONE|_REG_CFG_REG_MEAS_CTRL_MASK
+_REG_MEAS_CFG_TMP_DONE = _REG_MEAS_CFG_TMP_RDY|_REG_MEAS_CFG_SENSOR_RDY
+_REG_MEAS_CFG_TMP_DONE_MASK = _REG_MEAS_CFG_TMP_DONE|_REG_MEAS_CFG_MEAS_CTRL_MASK
+
+_REG_CFG_REG_FIFO_EN = 0x02
+_REG_CFG_REG_P_SHIFT = 0x04
+_REG_CFG_REG_T_SHIFT = 0x08
+_REG_CFG_REG_INT_PRS = 0x10
+_REG_CFG_REG_INT_TMP = 0x20
+_REG_CFG_REG_INT_FIFO = 0x40
+_REG_CFG_REG_INT_HL = 0x80
+
+class Oversampling(enum.IntEnum):
+    """ The enumeration defines the oversampling rates for pressure and temperature of SPL07-003
+        sensor"""
+    X1 = 0 # single (low precision for pressure and default for temperature)
+    # Note: Following are optional, and may not be relevant for temperature measurements
+    X2 = 1 # 2 times (low power)
+    X4 = 2 # 4 times
+    X8 = 3 # 8 times
+    X16 = 4 # 16 times (standard)
+    X32 = 5 # 32 times
+    X64 = 6 # 64 times (high precision)
+    X128 = 7 # 128 times
+
+_MEAS_TIME = {
+    Oversampling.X1: 0.0036,
+    Oversampling.X2: 0.0052,
+    Oversampling.X4: 0.0084,
+    Oversampling.X8: 0.0148,
+    Oversampling.X16: 0.0276,
+    Oversampling.X32: 0.0532,
+    Oversampling.X64: 0.1044,
+    Oversampling.X128: 0.2068,
+}
+
+_SCALE_FACTOR = {
+    Oversampling.X1: 0x080000,
+    Oversampling.X2: 0x180000,
+    Oversampling.X4: 0x380000,
+    Oversampling.X8: 0x780000,
+    Oversampling.X16: 0x03e000,
+    Oversampling.X32: 0x07e000,
+    Oversampling.X64: 0x0fe000,
+    Oversampling.X128: 0x1fe000,
+}
 
 def _u_to_s(u, bits):
     """ Convert 2's complement integer to signed number """
@@ -139,6 +185,12 @@ class Spl07003(Device):
         super().__init__(bus, address)
         self.__c = Calibration()
 
+        self.__clear_interrupt = False
+        self.__prs_meas_time = None
+        self.__prs_scale_factor = None
+        self.__tmp_meas_time = None
+        self.__tmp_scale_factor = None
+
     def __str_meas_cfg(self, cfg):
         coef_rdy = 'Yes' if cfg & 0x80 else 'No'
         sensor_rdy = 'Yes' if cfg & 0x40 else 'No'
@@ -165,7 +217,7 @@ class Spl07003(Device):
             return self.read(_REG_MEAS_CFG), False
         except OSError as e:
             if e.errno == errno.EIO:
-                return _REG_CFG_REG_MEAS_CTRL_NA, True
+                return _REG_MEAS_CFG_MEAS_CTRL_NA, True
             raise
 
     def __wait_for_sensor(self, value, mask=None, timeout=None, step=0.0005):
@@ -204,22 +256,46 @@ class Spl07003(Device):
     def read_coef(self):
         """ Reads the calibration coefficients from the sensor """
         start = time.monotonic_ns()
-        if not self.__wait_for_sensor(_REG_CFG_REG_COEF_RDY, timeout=0.1, step=0.002):
+        if not self.__wait_for_sensor(_REG_MEAS_CFG_COEF_RDY, timeout=0.1, step=0.002):
             raise Error("Timeout while reading calibration coefficients")
         print(f'CC ({(time.monotonic_ns() - start)/1e6} ms)')
 
         self.__c = Calibration(self.read(_REG_BLOCK_COEF))
         return self.__c
 
-    def write_cfg(self):
+    def write_cfg(self,
+                  prs_os_rate=Oversampling.X16,
+                  tmp_os_rate=Oversampling.X1,
+                  interrupts=False):
         """ Writes the configuration of FIFO, interuppts, pressure and temperature measurements """
-        self.write(_REG_PRS_CFG, 0b00000001)
-        self.write(_REG_TMP_CFG, 0b00000000)
-        self.write(_REG_CFG_REG, 0b00110000)
+        prs_cfg = prs_os_rate.value & _REG_PT_CFG_PRC_MASK
+        self.write(_REG_PRS_CFG, prs_cfg)
+
+        tmp_cfg = tmp_os_rate.value & _REG_PT_CFG_PRC_MASK
+        self.write(_REG_TMP_CFG, tmp_cfg)
+
+        cfg = 0
+        self.__clear_interrupt = interrupts
+        if interrupts:
+            cfg = _REG_CFG_REG_INT_PRS | _REG_CFG_REG_INT_TMP
+
+        self.__prs_meas_time = _MEAS_TIME[prs_os_rate]
+        self.__prs_scale_factor = _SCALE_FACTOR[prs_os_rate]
+        if prs_os_rate > Oversampling.X8:
+            cfg |= _REG_CFG_REG_P_SHIFT
+
+        self.__tmp_meas_time = _MEAS_TIME[tmp_os_rate]
+        self.__tmp_scale_factor = _SCALE_FACTOR[tmp_os_rate]
+        if tmp_os_rate > Oversampling.X8:
+            cfg |= _REG_CFG_REG_T_SHIFT
+
+        self.write(_REG_CFG_REG, cfg)
+
+        print(f'PRS_CFG: 0x{prs_cfg:02x}, TMP_CFG: 0x{tmp_cfg:02x}, CFG_REG: 0x{cfg:02x}')
 
     def measure_all(self):
         """ Runs continuous pressure and temperature measurements """
-        if not self.__wait_for_sensor(_REG_CFG_REG_SENSOR_RDY, timeout=0.1):
+        if not self.__wait_for_sensor(_REG_MEAS_CFG_SENSOR_RDY, timeout=0.1):
             raise Error("Timeout while waiting for sensor to be ready for measurements")
 
         self.write(_REG_MEAS_CFG, 0b111)
@@ -267,51 +343,74 @@ class Spl07003(Device):
             yield self.__c.p(p_raw_sc, t_raw_sc), self.__c.t(t_raw_sc)
 
     def __wait_for_prs(self, timeout=None):
-        return self.__wait_for_sensor(
-                _REG_CFG_REG_PRS_RDY,
-                timeout=timeout, step=0.0052
-            )
+        time.sleep(self.__prs_meas_time)
+        return True
 
     def __wait_for_tmp(self, timeout=None):
-        return self.__wait_for_sensor(
-                _REG_CFG_REG_TMP_RDY,
-                timeout=timeout, step=0.0036
-            )
+        time.sleep(self.__tmp_meas_time)
+        return True
 
     def __measure_pressure(self, wait):
-        print('Sensor is ready for pressure measurement, starting...')
         self.write(_REG_MEAS_CFG, 0b001)
 
         if not wait:
             wait = self.__wait_for_prs
 
         start = time.monotonic_ns()
-        wait(0.5)
+        if not wait(0.4):
+            raise Error("Timeout while measuring pressure")
+        end = time.monotonic_ns()
 
-        print(f'P ({(time.monotonic_ns() - start)/1e6} ms)\n\t'
-            f'INT_STS:  {self.__str_int_sts(self.read(_REG_INT_STS))}\n\t'
-            f'FIFO_STS: {self.__str_fifo_sts(self.read(_REG_FIFO_STS))}')
+        cfg = None
+        int_sts = None
+        if self.__clear_interrupt:
+            cfg = self.read(_REG_MEAS_CFG)
+            int_sts = self.read(_REG_INT_STS)
 
         data = self.read(_REG_BLOCK_PRS)
-        return _u_to_s((data[0] << 16) | (data[1] << 8) | data[2], 24)/1572864
+        p_raw = _u_to_s((data[0] << 16) | (data[1] << 8) | data[2], 24)
+        p_raw_sc = p_raw/self.__prs_scale_factor
+
+        print(f'P ({(end - start)/1e6} ms)\n\t'
+            f'PRS_B:    {" ".join(f"{x:02x}" for x in data)}\n\t'
+            f'P_raw:    {p_raw}\n\t'
+            f'P_raw_sc: {p_raw_sc:.6f}')
+        if self.__clear_interrupt:
+            print(f'\tINT_STS:  {self.__str_int_sts(int_sts)}\n'
+                  f'\tMEAS_CFG: {self.__str_meas_cfg(cfg)}')
+
+        return p_raw_sc
 
     def __measure_temperature(self, wait):
-        print('Sensor is ready for temperature measurement, starting...')
         self.write(_REG_MEAS_CFG, 0b010)
 
         if not wait:
             wait = self.__wait_for_tmp
 
         start = time.monotonic_ns()
-        if not wait(0.3):
-            raise Error("Timeout while measuring pressure")
+        if not wait(0.4):
+            raise Error("Timeout while measuring temperature")
+        end = time.monotonic_ns()
 
-        print(f'T ({(time.monotonic_ns() - start)/1e6} ms)\n\t'
-            f'INT_STS:  {self.__str_int_sts(self.read(_REG_INT_STS))}\n\t'
-            f'FIFO_STS: {self.__str_fifo_sts(self.read(_REG_FIFO_STS))}')
+        cfg = None
+        int_sts = None
+        if self.__clear_interrupt:
+            cfg = self.read(_REG_MEAS_CFG)
+            int_sts = self.read(_REG_INT_STS)
 
         data = self.read(_REG_BLOCK_TMP)
-        return _u_to_s((data[0] << 16) | (data[1] << 8) | data[2], 24)/524288
+        t_raw = _u_to_s((data[0] << 16) | (data[1] << 8) | data[2], 24)
+        t_raw_sc = t_raw/self.__tmp_scale_factor
+
+        print(f'T ({(end - start)/1e6} ms)\n\t'
+            f'TMP_B:    {" ".join(f"{x:02x}" for x in data)}\n\t'
+            f'T_raw:    {t_raw}\n\t'
+            f'T_raw_sc: {t_raw_sc:.6f}')
+        if self.__clear_interrupt:
+            print(f'\tINT_STS:  {self.__str_int_sts(int_sts)}\n'
+                  f'\tMEAS_CFG: {self.__str_meas_cfg(cfg)}')
+
+        return t_raw_sc
 
     def measure(self, wait=None):
         """ Measures pressure and temperature """
