@@ -170,6 +170,10 @@ class Calibration: # pylint: disable=too-many-instance-attributes
         """ Calculate temperature from scaled raw temperature value """
         return self.c0*0.5 + self.c1*t
 
+    def t_raw_sc(self, t):
+        """ Calculate scaled raw temperature value for given temperature """
+        return (t - self.c0*0.5)/self.c1
+
     def p(self, p, t):
         """ Calculate pressure from scaled raw pressure and temperature values """
         p2 = p*p
@@ -190,6 +194,7 @@ class Spl07003(Device):
         self.__prs_scale_factor = None
         self.__tmp_meas_time = None
         self.__tmp_scale_factor = None
+        self.__calibration_tmp = None
 
     def __str_meas_cfg(self, cfg):
         coef_rdy = 'Yes' if cfg & 0x80 else 'No'
@@ -206,11 +211,6 @@ class Spl07003(Device):
         tmp = 'Yes' if sts & 0x2 else 'No'
         prs = 'Yes' if sts & 0x1 else 'No'
         return f'INT_FIFO_FULL: {fifo_full}, INT_TMP: {tmp}, INT_PRS: {prs}'
-
-    def __str_fifo_sts(self, sts):
-        full = 'Yes' if sts & 0x2 else 'No'
-        empty = 'Yes' if sts & 0x2 else 'No'
-        return f'FIFO_FULL: {full}, FIFO_EMPTY: {empty}'
 
     def __read_cfg_safe(self):
         try:
@@ -263,90 +263,21 @@ class Spl07003(Device):
         self.__c = Calibration(self.read(_REG_BLOCK_COEF))
         return self.__c
 
-    def write_cfg(self,
-                  prs_os_rate=Oversampling.X16,
-                  tmp_os_rate=Oversampling.X1,
-                  interrupts=False):
-        """ Writes the configuration of FIFO, interuppts, pressure and temperature measurements """
-        prs_cfg = prs_os_rate.value & _REG_PT_CFG_PRC_MASK
-        self.write(_REG_PRS_CFG, prs_cfg)
+    @property
+    def calibration_tmp(self):
+        """ Returns temperature used for pressure measurements calibration """
+        return self.__c.t(self.__calibration_tmp) if self.__calibration_tmp is not None else None
 
-        tmp_cfg = tmp_os_rate.value & _REG_PT_CFG_PRC_MASK
-        self.write(_REG_TMP_CFG, tmp_cfg)
+    @calibration_tmp.setter
+    def calibration_tmp(self, t):
+        """ Sets the temperature used for pressure measurements calibration """
+        self.__calibration_tmp = self.__c.t_raw_sc(t) if t is not None else None
 
-        cfg = 0
-        self.__clear_interrupt = interrupts
-        if interrupts:
-            cfg = _REG_CFG_REG_INT_PRS | _REG_CFG_REG_INT_TMP
-
-        self.__prs_meas_time = _MEAS_TIME[prs_os_rate]
-        self.__prs_scale_factor = _SCALE_FACTOR[prs_os_rate]
-        if prs_os_rate > Oversampling.X8:
-            cfg |= _REG_CFG_REG_P_SHIFT
-
-        self.__tmp_meas_time = _MEAS_TIME[tmp_os_rate]
-        self.__tmp_scale_factor = _SCALE_FACTOR[tmp_os_rate]
-        if tmp_os_rate > Oversampling.X8:
-            cfg |= _REG_CFG_REG_T_SHIFT
-
-        self.write(_REG_CFG_REG, cfg)
-
-        print(f'PRS_CFG: 0x{prs_cfg:02x}, TMP_CFG: 0x{tmp_cfg:02x}, CFG_REG: 0x{cfg:02x}')
-
-    def measure_all(self):
-        """ Runs continuous pressure and temperature measurements """
-        if not self.__wait_for_sensor(_REG_MEAS_CFG_SENSOR_RDY, timeout=0.1):
-            raise Error("Timeout while waiting for sensor to be ready for measurements")
-
-        self.write(_REG_MEAS_CFG, 0b111)
-
-        while True:
-            time.sleep(0.001)
-
-            count = 0
-            t_rdy, p_rdy = False, False
-            while count < 10000:
-                time.sleep(0.001)
-                count += 1
-
-                cfg = self.read(_REG_MEAS_CFG)
-                print(f'P+T {count}: {self.__str_meas_cfg(cfg)}')
-                print(f'FIFO_STS: 0x{self.read(_REG_FIFO_STS):02x}')
-                if not p_rdy and (cfg & 0x50 == 0x50):
-                    data = self.read(_REG_BLOCK_PRS)
-                    # print(f'PRS_BX: {" ".join(f"{x:02x}" for x in data)}')
-                    p_raw_u = (data[0] << 16) | (data[1] << 8) | data[2]
-                    # print(f'P_raw: 0x{p_raw_u:06x}')
-                    p_raw = _u_to_s(p_raw_u, 24)
-                    # print(f'P_raw: {p_raw}')
-                    if t_rdy:
-                        break
-                    p_rdy = True
-
-                if not t_rdy and (cfg & 0x60 == 0x60):
-                    data = self.read(_REG_BLOCK_TMP)
-                    # print(f'TMP_BX: {" ".join(f"{x:02x}" for x in data)}')
-                    t_raw_u = (data[0] << 16) | (data[1] << 8) | data[2]
-                    # print(f'T_raw: 0x{t_raw_u:06x}')
-                    t_raw = _u_to_s(t_raw_u, 24)
-                    # print(f'T_raw: {t_raw}')
-                    if p_rdy:
-                        break
-                    t_rdy = True
-            else:
-                raise Error("Timeout while measuring pressure and temperature")
-
-            p_raw_sc = p_raw/1572864
-            t_raw_sc = t_raw/524288
-            # print(f'P_raw_sc: {p_raw_sc:.6f}, T_raw_sc: {t_raw_sc:.6f}')
-
-            yield self.__c.p(p_raw_sc, t_raw_sc), self.__c.t(t_raw_sc)
-
-    def __wait_for_prs(self, timeout=None):
+    def __wait_for_prs(self, timeout=None): # pylint: disable=unused-argument
         time.sleep(self.__prs_meas_time)
         return True
 
-    def __wait_for_tmp(self, timeout=None):
+    def __wait_for_tmp(self, timeout=None): # pylint: disable=unused-argument
         time.sleep(self.__tmp_meas_time)
         return True
 
@@ -412,8 +343,38 @@ class Spl07003(Device):
 
         return t_raw_sc
 
-    def measure(self, wait=None):
-        """ Measures pressure and temperature """
-        p_raw_sc = self.__measure_pressure(wait)
-        t_raw_sc = self.__measure_temperature(wait)
-        return self.__c.p(p_raw_sc, t_raw_sc), self.__c.t(t_raw_sc)
+    def cmd_mode_measure(self,
+                         prs_os_rate=Oversampling.X16,
+                         tmp_os_rate=Oversampling.X1,
+                         interrupts=False,
+                         wait=None):
+        """ Measures pressure and temperature in command mode """
+        prs_cfg = prs_os_rate.value & _REG_PT_CFG_PRC_MASK
+        self.write(_REG_PRS_CFG, prs_cfg)
+
+        tmp_cfg = tmp_os_rate.value & _REG_PT_CFG_PRC_MASK
+        self.write(_REG_TMP_CFG, tmp_cfg)
+
+        cfg = 0
+        self.__clear_interrupt = interrupts
+        if interrupts:
+            cfg = _REG_CFG_REG_INT_PRS | _REG_CFG_REG_INT_TMP
+
+        self.__prs_meas_time = _MEAS_TIME[prs_os_rate]
+        self.__prs_scale_factor = _SCALE_FACTOR[prs_os_rate]
+        if prs_os_rate > Oversampling.X8:
+            cfg |= _REG_CFG_REG_P_SHIFT
+
+        self.__tmp_meas_time = _MEAS_TIME[tmp_os_rate]
+        self.__tmp_scale_factor = _SCALE_FACTOR[tmp_os_rate]
+        if tmp_os_rate > Oversampling.X8:
+            cfg |= _REG_CFG_REG_T_SHIFT
+
+        self.write(_REG_CFG_REG, cfg)
+
+        print(f'PRS_CFG: 0x{prs_cfg:02x}, TMP_CFG: 0x{tmp_cfg:02x}, CFG_REG: 0x{cfg:02x}')
+
+        while True:
+            p_raw_sc = self.__measure_pressure(wait)
+            t_raw_sc = self.__measure_temperature(wait)
+            yield self.__c.p(p_raw_sc, t_raw_sc), self.__c.t(t_raw_sc)

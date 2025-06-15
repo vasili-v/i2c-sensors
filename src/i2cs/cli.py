@@ -61,16 +61,17 @@ def main():
             calibration = ps.read_coef()
             print(f'{calibration}')
 
-            ps.write_cfg(
-                    args.pressure_prs_oversampling, args.pressure_tmp_oversampling,
-                    wait is not None
-                )
-
             count = 0
+            measurement = ps.cmd_mode_measure(
+                    prs_os_rate=args.pressure_prs_oversampling,
+                    tmp_os_rate=args.pressure_tmp_oversampling,
+                    interrupts= wait is not None,
+                    wait=wait,
+                )
             while True:
                 led.on()
                 try:
-                    p, t = ps.measure(wait)
+                    p, t = next(measurement)
                 finally:
                     led.off()
                 count += 1
