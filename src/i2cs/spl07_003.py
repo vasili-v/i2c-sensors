@@ -343,6 +343,63 @@ class Spl07003(Device):
 
         return t_raw_sc
 
+    def cmd_mode_measure_prs(self,
+                             os_rate=Oversampling.X16,
+                             interrupts=False,
+                             wait=None):
+        """ Measures pressure in command mode """
+        prs_cfg = os_rate.value & _REG_PT_CFG_PRC_MASK
+        self.write(_REG_PRS_CFG, prs_cfg)
+
+        self.write(_REG_TMP_CFG, 0)
+
+        cfg = 0
+        self.__clear_interrupt = interrupts
+        if interrupts:
+            cfg = _REG_CFG_REG_INT_PRS
+
+        self.__prs_meas_time = _MEAS_TIME[os_rate]
+        self.__prs_scale_factor = _SCALE_FACTOR[os_rate]
+        if os_rate > Oversampling.X8:
+            cfg |= _REG_CFG_REG_P_SHIFT
+
+        self.write(_REG_CFG_REG, cfg)
+
+        print(f'PRS_CFG: 0x{prs_cfg:02x}, CFG_REG: 0x{cfg:02x}')
+
+        while True:
+            p_raw_sc = self.__measure_pressure(wait)
+            t_raw_sc = self.__calibration_tmp
+            yield self.__c.p(p_raw_sc, t_raw_sc) if t_raw_sc is not None else p_raw_sc
+
+    def cmd_mode_measure_tmp(self,
+                             os_rate=Oversampling.X1,
+                             interrupts=False,
+                             wait=None):
+        """ Measures temperature in command mode """
+        self.write(_REG_PRS_CFG, 0)
+
+        tmp_cfg = os_rate.value & _REG_PT_CFG_PRC_MASK
+        self.write(_REG_TMP_CFG, tmp_cfg)
+
+        cfg = 0
+        self.__clear_interrupt = interrupts
+        if interrupts:
+            cfg = _REG_CFG_REG_INT_TMP
+
+        self.__tmp_meas_time = _MEAS_TIME[os_rate]
+        self.__tmp_scale_factor = _SCALE_FACTOR[os_rate]
+        if os_rate > Oversampling.X8:
+            cfg |= _REG_CFG_REG_T_SHIFT
+
+        self.write(_REG_CFG_REG, cfg)
+
+        print(f'TMP_CFG: 0x{tmp_cfg:02x}, CFG_REG: 0x{cfg:02x}')
+
+        while True:
+            t_raw_sc = self.__measure_temperature(wait)
+            yield self.__c.t(t_raw_sc)
+
     def cmd_mode_measure(self,
                          prs_os_rate=Oversampling.X16,
                          tmp_os_rate=Oversampling.X1,
