@@ -7,6 +7,7 @@ import errno
 
 from .error import Error
 from .device import Block, Device
+from .alarm import set_alarm
 
 DEFAULT_ADDRESS=0x77
 ALTERNATE_ADDRESS=0x76
@@ -25,19 +26,27 @@ _REG_RESET=0x0c
 _REG_BLOCK_COEF=Block(0x10, 21)
 
 _REG_PT_CFG_PRC_MASK = 0x0f
+_REG_PT_CFG_RATE_MASK = 0xf0
+
+_REG_MEAS_CFG_MEAS_CTRL_IDLE = 0
+_REG_MEAS_CFG_MEAS_CTRL_CMD_P = 1
+_REG_MEAS_CFG_MEAS_CTRL_CMD_T = 2
+_REG_MEAS_CFG_MEAS_CTRL_NA = 3
+_REG_MEAS_CFG_MEAS_CTRL_BKG_P = 5
+_REG_MEAS_CFG_MEAS_CTRL_BKG_T = 6
+_REG_MEAS_CFG_MEAS_CTRL_BKG_PT = 7
 
 _MEAS_CTRL_VALUES = {
-    0b000: 'Idle',
-    0b001: 'P',
-    0b010: 'T',
-    0b011: 'N/A',
+    _REG_MEAS_CFG_MEAS_CTRL_IDLE: 'Idle',
+    _REG_MEAS_CFG_MEAS_CTRL_CMD_P: 'P',
+    _REG_MEAS_CFG_MEAS_CTRL_CMD_T: 'T',
+    _REG_MEAS_CFG_MEAS_CTRL_NA: 'N/A',
     0b100: 'N/A',
-    0b101: 'P cont.',
-    0b110: 'T cont.',
-    0b111: 'P+T cont.'
+    _REG_MEAS_CFG_MEAS_CTRL_BKG_P: 'P cont.',
+    _REG_MEAS_CFG_MEAS_CTRL_BKG_T: 'T cont.',
+    _REG_MEAS_CFG_MEAS_CTRL_BKG_PT: 'P+T cont.'
 }
 
-_REG_MEAS_CFG_MEAS_CTRL_NA = 0x3
 _REG_MEAS_CFG_MEAS_CTRL_MASK = 0x07
 _REG_MEAS_CFG_PRS_RDY = 0x10
 _REG_MEAS_CFG_TMP_RDY = 0x20
@@ -61,6 +70,26 @@ _REG_CFG_REG_INT_TMP = 0x20
 _REG_CFG_REG_INT_FIFO = 0x40
 _REG_CFG_REG_INT_HL = 0x80
 
+class Rate(enum.IntEnum):
+    """ The enumeration defines the pressure and temperature measurement rates for background mode
+    """
+    M1 = 0 << 4 # 1 measurements pr. sec.
+    M2 = 1 << 4 # 2 measurements pr. sec.
+    M4 = 2 << 4 # 4 measurements pr. sec.
+    M8 = 3 << 4 # 8 measurements pr. sec.
+    M16 = 4 << 4 # 16 measurements pr. sec.
+    M32 = 5 << 4 # 32 measurements pr. sec.
+    M64 = 6 << 4 # 64 measurements pr. sec.
+    M128 = 7 << 4 # 128 measurements pr. sec.
+    M25_16 = 8 << 4 # 25/16 (1.5625) sample/sec
+    M25_8 = 9 << 4 # 25/8 (3.125) sample/sec
+    M25_4 = 10 << 4 # 25/4 (6.25) sample/sec
+    M25_2 = 11 << 4 # 25/2 (12.5) sample/sec
+    M25 = 12 << 4 # 25 sample/sec
+    M50 = 13 << 4 # 50 sample/sec
+    M100 = 14 << 4 # 100 sample/sec
+    M200 = 15 << 4 # 200 sample/sec
+
 class Oversampling(enum.IntEnum):
     """ The enumeration defines the oversampling rates for pressure and temperature of SPL07-003
         sensor"""
@@ -74,6 +103,25 @@ class Oversampling(enum.IntEnum):
     X64 = 6 # 64 times (high precision)
     X128 = 7 # 128 times
 
+_MAX_OVERSAMPLING = {
+    Rate.M1: Oversampling.X128,
+    Rate.M25_16: Oversampling.X128,
+    Rate.M2: Oversampling.X128,
+    Rate.M25_8: Oversampling.X128,
+    Rate.M4: Oversampling.X128,
+    Rate.M25_4: Oversampling.X64,
+    Rate.M8: Oversampling.X64,
+    Rate.M25_2: Oversampling.X32,
+    Rate.M16: Oversampling.X32,
+    Rate.M25: Oversampling.X16,
+    Rate.M32: Oversampling.X16,
+    Rate.M50: Oversampling.X8,
+    Rate.M64: Oversampling.X8,
+    Rate.M100: Oversampling.X2,
+    Rate.M128: Oversampling.X2,
+    Rate.M200: Oversampling.X1,
+}
+
 _MEAS_TIME = {
     Oversampling.X1: 0.0036,
     Oversampling.X2: 0.0052,
@@ -83,6 +131,25 @@ _MEAS_TIME = {
     Oversampling.X32: 0.0532,
     Oversampling.X64: 0.1044,
     Oversampling.X128: 0.2068,
+}
+
+_CYCLE_TIME = {
+    Rate.M1: 1,
+    Rate.M25_16: 16/25,
+    Rate.M2: 1/2,
+    Rate.M25_8: 8/25,
+    Rate.M4: 1/4,
+    Rate.M25_4: 4/25,
+    Rate.M8: 1/8,
+    Rate.M25_2: 2/25,
+    Rate.M16: 1/16,
+    Rate.M25: 1/25,
+    Rate.M32: 1/32,
+    Rate.M50: 1/50,
+    Rate.M64: 1/64,
+    Rate.M100: 1/100,
+    Rate.M128: 1/128,
+    Rate.M200: 1/200,
 }
 
 _SCALE_FACTOR = {
@@ -282,7 +349,7 @@ class Spl07003(Device):
         return True
 
     def __measure_pressure(self, wait):
-        self.write(_REG_MEAS_CFG, 0b001)
+        self.write(_REG_MEAS_CFG, _REG_MEAS_CFG_MEAS_CTRL_CMD_P)
 
         if not wait:
             wait = self.__wait_for_prs
@@ -313,7 +380,7 @@ class Spl07003(Device):
         return p_raw_sc
 
     def __measure_temperature(self, wait):
-        self.write(_REG_MEAS_CFG, 0b010)
+        self.write(_REG_MEAS_CFG, _REG_MEAS_CFG_MEAS_CTRL_CMD_T)
 
         if not wait:
             wait = self.__wait_for_tmp
@@ -435,3 +502,206 @@ class Spl07003(Device):
             p_raw_sc = self.__measure_pressure(wait)
             t_raw_sc = self.__measure_temperature(wait)
             yield self.__c.p(p_raw_sc, t_raw_sc), self.__c.t(t_raw_sc)
+
+    def bkg_mode_measure_prs(self,
+                             rate=Rate.M1,
+                             os_rate=Oversampling.X16,
+                             interrupts=False,
+                             wait=None):
+        """ Measures pressure in background mode """
+        os_rate = min(os_rate, _MAX_OVERSAMPLING[rate])
+        prs_cfg = (rate & _REG_PT_CFG_RATE_MASK) | (os_rate.value & _REG_PT_CFG_PRC_MASK)
+        self.write(_REG_PRS_CFG, prs_cfg)
+
+        self.write(_REG_TMP_CFG, 0)
+
+        cfg = 0
+        self.__clear_interrupt = interrupts
+        if interrupts:
+            cfg |= _REG_CFG_REG_INT_PRS
+
+        self.__prs_meas_time = _CYCLE_TIME[rate]
+        self.__prs_scale_factor = _SCALE_FACTOR[os_rate]
+        if os_rate > Oversampling.X8:
+            cfg |= _REG_CFG_REG_P_SHIFT
+
+        self.write(_REG_CFG_REG, cfg)
+
+        meas_cfg = _REG_MEAS_CFG_MEAS_CTRL_BKG_P
+
+        print(f'PRS_CFG: 0x{prs_cfg:02x}, '
+              f'CFG_REG: 0x{cfg:02x}, '
+              f'MEAS_CFG: 0x{meas_cfg:x} ({_MEAS_CTRL_VALUES[meas_cfg]})')
+
+        if not wait:
+            wait = self.__wait_for_prs
+
+        while True:
+            self.write(_REG_MEAS_CFG, meas_cfg)
+            start = time.monotonic_ns()
+            if not wait(2):
+                raise Error("Timeout while measuring pressure")
+            end = time.monotonic_ns()
+
+            cfg = None
+            int_sts = None
+            if self.__clear_interrupt:
+                cfg = self.read(_REG_MEAS_CFG)
+                int_sts = self.read(_REG_INT_STS)
+
+            data = self.read(_REG_BLOCK_PRS)
+            p_raw = _u_to_s((data[0] << 16) | (data[1] << 8) | data[2], 24)
+            p_raw_sc = p_raw/self.__prs_scale_factor
+
+            print(f'P ({(end - start)/1e6} ms)\n\t'
+                f'PRS_B:    {" ".join(f"{x:02x}" for x in data)}\n\t'
+                f'P_raw:    {p_raw}\n\t'
+                f'P_raw_sc: {p_raw_sc:.6f}')
+            if self.__clear_interrupt:
+                print(f'\tINT_STS:  {self.__str_int_sts(int_sts)}\n'
+                      f'\tMEAS_CFG: {self.__str_meas_cfg(cfg)}')
+
+            t_raw_sc = self.__calibration_tmp
+            yield self.__c.p(p_raw_sc, t_raw_sc) if t_raw_sc is not None else p_raw_sc
+
+    def bkg_mode_measure_tmp(self,
+                             rate=Rate.M1,
+                             os_rate=Oversampling.X1,
+                             interrupts=False,
+                             wait=None):
+        """ Measures temperature in background mode """
+        self.write(_REG_PRS_CFG, 0)
+
+        os_rate = min(os_rate, _MAX_OVERSAMPLING[rate])
+        tmp_cfg = (rate & _REG_PT_CFG_RATE_MASK) | (os_rate.value & _REG_PT_CFG_PRC_MASK)
+        self.write(_REG_TMP_CFG, tmp_cfg)
+
+        cfg = 0
+        self.__clear_interrupt = interrupts
+        if interrupts:
+            cfg |= _REG_CFG_REG_INT_TMP
+
+        self.__tmp_meas_time = _CYCLE_TIME[rate]
+        self.__tmp_scale_factor = _SCALE_FACTOR[os_rate]
+        if os_rate > Oversampling.X8:
+            cfg |= _REG_CFG_REG_T_SHIFT
+
+        self.write(_REG_CFG_REG, cfg)
+
+        meas_cfg = _REG_MEAS_CFG_MEAS_CTRL_BKG_T
+
+        print(f'TMP_CFG: 0x{tmp_cfg:02x}, '
+              f'CFG_REG: 0x{cfg:02x}, '
+              f'MEAS_CFG: 0x{meas_cfg:x} ({_MEAS_CTRL_VALUES[meas_cfg]})')
+
+        if not wait:
+            wait = self.__wait_for_tmp
+
+        while True:
+            self.write(_REG_MEAS_CFG, meas_cfg)
+            start = time.monotonic_ns()
+            if not wait(2):
+                raise Error("Timeout while measuring temperature")
+            end = time.monotonic_ns()
+
+            cfg = None
+            int_sts = None
+            if self.__clear_interrupt:
+                cfg = self.read(_REG_MEAS_CFG)
+                int_sts = self.read(_REG_INT_STS)
+
+            data = self.read(_REG_BLOCK_TMP)
+            t_raw = _u_to_s((data[0] << 16) | (data[1] << 8) | data[2], 24)
+            t_raw_sc = t_raw/self.__tmp_scale_factor
+
+            print(f'T ({(end - start)/1e6} ms)\n\t'
+                f'TMP_B:    {" ".join(f"{x:02x}" for x in data)}\n\t'
+                f't_raw:    {t_raw}\n\t'
+                f't_raw_sc: {t_raw_sc:.6f}')
+            if self.__clear_interrupt:
+                print(f'\tINT_STS:  {self.__str_int_sts(int_sts)}\n'
+                      f'\tMEAS_CFG: {self.__str_meas_cfg(cfg)}')
+
+            yield self.__c.t(t_raw_sc)
+
+    def bkg_mode_measure(self,
+                         prs_rate=Rate.M1,
+                         prs_os_rate=Oversampling.X16,
+                         tmp_rate=Rate.M1,
+                         tmp_os_rate=Oversampling.X1,
+                         interrupts=False,
+                         wait=None):
+        """ Measures temperature in background mode """
+        prs_os_rate = min(prs_os_rate, _MAX_OVERSAMPLING[prs_rate])
+        prs_cfg = (prs_rate & _REG_PT_CFG_RATE_MASK) | (prs_os_rate.value & _REG_PT_CFG_PRC_MASK)
+        self.write(_REG_PRS_CFG, prs_cfg)
+
+        tmp_os_rate = min(tmp_os_rate, _MAX_OVERSAMPLING[tmp_rate])
+        tmp_cfg = (tmp_rate & _REG_PT_CFG_RATE_MASK) | (tmp_os_rate.value & _REG_PT_CFG_PRC_MASK)
+        self.write(_REG_TMP_CFG, tmp_cfg)
+
+        cfg = 0
+        self.__clear_interrupt = interrupts
+        if interrupts:
+            cfg |= _REG_CFG_REG_INT_PRS | _REG_CFG_REG_INT_TMP
+
+        self.__prs_scale_factor = _SCALE_FACTOR[prs_os_rate]
+        self.__tmp_scale_factor = _SCALE_FACTOR[tmp_os_rate]
+        if prs_os_rate > Oversampling.X8:
+            cfg |= _REG_CFG_REG_P_SHIFT
+        if tmp_os_rate > Oversampling.X8:
+            cfg |= _REG_CFG_REG_T_SHIFT
+
+        self.write(_REG_CFG_REG, cfg)
+
+        meas_cfg = _REG_MEAS_CFG_MEAS_CTRL_BKG_PT
+
+        print(f'PRS_CFG: 0x{prs_cfg:02x}, '
+              f'TMP_CFG: 0x{tmp_cfg:02x}, '
+              f'CFG_REG: 0x{cfg:02x}, '
+              f'MEAS_CFG: 0x{meas_cfg:x} ({_MEAS_CTRL_VALUES[meas_cfg]})')
+
+        alarm = set_alarm(
+                _CYCLE_TIME[prs_rate], _MEAS_TIME[prs_os_rate],
+                _CYCLE_TIME[tmp_rate], _MEAS_TIME[tmp_os_rate],
+            )
+        p_raw_sc, p, t_raw_sc, t = None, None, None, None
+
+        self.write(_REG_MEAS_CFG, meas_cfg)
+
+        for prs_rdy, tmp_rdy, dt in alarm:
+            prs_data = self.read(_REG_BLOCK_PRS)
+            tmp_data = self.read(_REG_BLOCK_TMP)
+
+            cfg = None
+            int_sts = None
+            if self.__clear_interrupt:
+                cfg = self.read(_REG_MEAS_CFG)
+                int_sts = self.read(_REG_INT_STS)
+
+            print(f'M ({dt*1e3:.2f} ms)')
+            if prs_rdy:
+                p_raw = _u_to_s((prs_data[0] << 16) | (prs_data[1] << 8) | prs_data[2], 24)
+                p_raw_sc = p_raw/self.__prs_scale_factor
+                print(f'\tPRS_B:    {" ".join(f"{x:02x}" for x in prs_data)}\n'
+                      f'\tp_raw:    {p_raw}\n'
+                      f'\tp_raw_sc: {p_raw_sc:.6f}')
+
+            if tmp_rdy:
+                t_raw = _u_to_s((tmp_data[0] << 16) | (tmp_data[1] << 8) | tmp_data[2], 24)
+                t_raw_sc = t_raw/self.__tmp_scale_factor
+                t = self.__c.t(t_raw_sc)
+                print(f'\tTMP_B:    {" ".join(f"{x:02x}" for x in tmp_data)}\n'
+                      f'\tt_raw:    {t_raw}\n'
+                      f'\tt_raw_sc: {t_raw_sc:.6f}')
+
+            if self.__clear_interrupt:
+                print(f'\tINT_STS:  {self.__str_int_sts(int_sts)}\n'
+                      f'\tMEAS_CFG: {self.__str_meas_cfg(cfg)}')
+
+            if p_raw_sc is not None and t_raw_sc is not None:
+                p = self.__c.p(p_raw_sc, t_raw_sc)
+
+            yield p, t
+
+            self.write(_REG_MEAS_CFG, meas_cfg)
