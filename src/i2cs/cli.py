@@ -33,6 +33,12 @@ def make_args_paraser():
     parser = argparse.ArgumentParser(description='I2C Sensors communication CLI')
 
     parser.add_argument(
+            '--limit', type=int,
+            help='Stop after given number of measurement cycles (default: run indefinitely)',
+            metavar='N'
+        )
+
+    parser.add_argument(
             '--led', type=int,
             help='GPIO pin number for indicating LED (default: don\'t use LED)',
             metavar='PIN'
@@ -133,16 +139,17 @@ def main():
             count = 0
             measurement = start_measurement(ps, args, wait)
             if args.pressure_background_mode:
-                while not s.is_signaled():
+                while not s.is_signaled() and count < args.limit:
                     led.on()
                     try:
                         result = next(measurement)
                     finally:
                         led.off()
                     count += 1
-                    print_measurement(count, result)
+                    if result is not None:
+                        print_measurement(count, result)
             else:
-                while True:
+                while count < args.limit:
                     led.on()
                     try:
                         result = next(measurement)
@@ -167,10 +174,8 @@ def prs_start_measurement(sensor, args, wait):
 def prs_start_bkg_measurement(sensor, args, wait):
     """ Starts the pressure measurement """
     return sensor.bkg_mode_measure(
-            prs_rate=args.pressure_prs_rate,
-            prs_os_rate=args.pressure_prs_oversampling,
-            tmp_rate=args.pressure_tmp_rate,
-            tmp_os_rate=args.pressure_tmp_oversampling,
+            prs_rates=(args.pressure_prs_rate, args.pressure_prs_oversampling),
+            tmp_rates=(args.pressure_tmp_rate, args.pressure_tmp_oversampling),
             interrupts=wait is not None,
             wait=wait,
         )
@@ -195,8 +200,7 @@ def prs_start_prs_bkg_measurement(sensor, args, wait):
     """ Starts the pressure measurement """
     sensor.calibration_tmp = args.pressure_calibration_tmp
     return sensor.bkg_mode_measure_prs(
-            rate=args.pressure_prs_rate,
-            os_rate=args.pressure_prs_oversampling,
+            rates=(args.pressure_prs_rate, args.pressure_prs_oversampling),
             interrupts=wait is not None,
             wait=wait,
         )
@@ -222,8 +226,7 @@ def prs_start_tmp_measurement(sensor, args, wait):
 def prs_start_tmp_bkg_measurement(sensor, args, wait):
     """ Starts the temperature measurement in background mode """
     return sensor.bkg_mode_measure_tmp(
-            rate=args.pressure_tmp_rate,
-            os_rate=args.pressure_tmp_oversampling,
+            rates=(args.pressure_tmp_rate, args.pressure_tmp_oversampling),
             interrupts=wait is not None,
             wait=wait,
         )

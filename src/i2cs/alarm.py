@@ -4,40 +4,50 @@ import time
 
 _NANOSECONDS = 1e9
 
-def set_alarm(primary_cycle, primary_offset, secondory_cycle, secondary_offset):
+def set_alarm(pri_cycle, pri_offset, sec_cycle, sec_offset):
     """ Returns an iterator which yields when one or both of time cycles end and duration of
         the wait. However, the iterator tries to postpone secondary cycle for duration of
         the primaries' offset if they overlap
     """
-    primary_cycle = int(primary_cycle*_NANOSECONDS)
-    primary_offset = int(primary_offset*_NANOSECONDS)
-    secondary_cycle = int(secondory_cycle*_NANOSECONDS)
-    secondary_offset = int(secondary_offset*_NANOSECONDS)
+    pri_cycle_ns = int(pri_cycle*_NANOSECONDS)
+    pri_offset_ns = int(pri_offset*_NANOSECONDS)
+    sec_cycle_ns = int(sec_cycle*_NANOSECONDS)
+    sec_offset_ns = int(sec_offset*_NANOSECONDS)
 
     now = time.monotonic_ns()
     start = now
-    primary_deadline = now + primary_offset
-    secondary_deadline = primary_deadline + secondary_offset
+    pri_deadline = now + pri_offset_ns
+    sec_deadline = pri_deadline + sec_offset_ns
 
     while True:
-        time.sleep((min(primary_deadline, secondary_deadline) - now)/_NANOSECONDS)
+        dt = min(pri_deadline, sec_deadline) - time.monotonic_ns()
+        time.sleep(max(dt/_NANOSECONDS, 0))
 
         now = time.monotonic_ns()
-        primary_rdy = primary_deadline <= now
-        secondary_rdy = secondary_deadline <= now
+        primary_rdy = pri_deadline <= now
+        secondary_rdy = sec_deadline <= now
 
         if not (primary_rdy or secondary_rdy):
             continue
 
         if primary_rdy:
-            primary_deadline += primary_cycle
+            pri_deadline += pri_cycle_ns
 
         if secondary_rdy:
-            secondary_deadline += secondary_cycle
+            sec_deadline += sec_cycle_ns
 
-        if primary_deadline + primary_offset > secondary_deadline and \
-            secondary_deadline + secondary_offset > primary_deadline:
-            secondary_deadline = primary_deadline + primary_offset
+        if pri_deadline > sec_deadline - sec_offset_ns and \
+            sec_deadline > pri_deadline - pri_offset_ns:
+            sec_deadline = pri_deadline + sec_offset_ns
 
         yield primary_rdy, secondary_rdy, (now - start)/_NANOSECONDS
+        start = now
+
+def set_alarm_external(wait, timeout=None):
+    """ Returns an iterator which yields when given wait function returns True. If the wait
+        function returns False, stops the iteration """
+    start = time.monotonic_ns()
+    while wait(timeout):
+        now = time.monotonic_ns()
+        yield False, False, (now - start)/_NANOSECONDS
         start = now

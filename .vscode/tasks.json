@@ -1,0 +1,62 @@
+{
+  // See https://go.microsoft.com/fwlink/?LinkId=733558
+  // for the documentation about the tasks.json format
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Print Environment",
+      "type": "shell",
+      "windows": {
+        "command": ".\\run.ps1 -Command PrintEnv"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "echo": false,
+        "showReuseMessage": false
+      }
+    },
+    {
+      "label": "Run Linter",
+      "type": "shell",
+      "windows": {
+        "command": ".\\run.ps1 -Command Lint"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "echo": false,
+        "showReuseMessage": false
+      }
+    },
+    {
+      "label": "Build",
+      "type": "shell",
+      "windows": {
+        "command": ".\\run.ps1 -Command Build"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "echo": false,
+        "showReuseMessage": false
+      }
+    },
+    {
+      "label": "Push Package",
+      "type": "shell",
+      "windows": {
+        "command": ".\\run.ps1 -Command Push -Destination ${input:destination}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "echo": false,
+        "showReuseMessage": false
+      }
+    }
+  ],
+  "inputs": [
+    {
+      "id": "destination",
+      "type": "promptString",
+      "description": "The destination for the package"
+    }
+  ]
+}
