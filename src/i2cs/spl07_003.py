@@ -73,6 +73,9 @@ _REG_CFG_REG_INT_HL = 0x80
 _REG_INT_STS_PRS = 0x01
 _REG_INT_STS_TMP = 0x02
 
+_FIFO_EMPTY = [0x80, 0x00, 0x00]
+_FIFO_LSB = 0x1
+
 class Rate(enum.IntEnum):
     """ The enumeration defines the pressure and temperature measurement rates for background mode
     """
@@ -667,7 +670,7 @@ class Spl07003(Device):
 
             yield self.__c.t(t_raw_sc)
 
-    def __configure_bkg_measurement(self, prs_rates, tmp_rates, interrupts, wait):
+    def __configure_bkg_measurement(self, prs_rates, tmp_rates, interrupts, fifo, wait):
         """ Configures the background mode measurement for pressure and temperature """
         prs_rate, prs_os_rate = _unpack_rates(prs_rates, _DEFAULT_PRS_RATES)
         prs_os_rate = min(prs_os_rate, _MAX_OVERSAMPLING[prs_rate])
@@ -682,7 +685,13 @@ class Spl07003(Device):
         cfg = 0
         self.__clear_interrupt = True
         if interrupts:
-            cfg |= _REG_CFG_REG_INT_PRS | _REG_CFG_REG_INT_TMP
+            if fifo:
+                cfg |= _REG_CFG_REG_INT_FIFO
+            else:
+                cfg |= _REG_CFG_REG_INT_PRS | _REG_CFG_REG_INT_TMP
+
+        if fifo:
+            cfg |= _REG_CFG_REG_FIFO_EN
 
         self.__prs_scale_factor = _SCALE_FACTOR[prs_os_rate]
         self.__tmp_scale_factor = _SCALE_FACTOR[tmp_os_rate]
@@ -705,7 +714,7 @@ class Spl07003(Device):
                     _CYCLE_TIME[tmp_rate], _MEAS_TIME[tmp_os_rate],
                 )
 
-        return set_alarm_external(wait, 2)
+        return set_alarm_external(wait, 64 if fifo else 2)
 
     def bkg_mode_measure(self, # pylint: disable=too-many-locals
                          prs_rates=_DEFAULT_PRS_RATES,
@@ -713,7 +722,7 @@ class Spl07003(Device):
                          interrupts=False,
                          wait=None):
         """ Measures temperature in background mode """
-        alarm = self.__configure_bkg_measurement(prs_rates, tmp_rates, interrupts, wait)
+        alarm = self.__configure_bkg_measurement(prs_rates, tmp_rates, interrupts, False, wait)
 
         p_raw_sc, p, t_raw_sc, t = None, None, None, None
 
@@ -754,5 +763,54 @@ class Spl07003(Device):
                 p = self.__c.p(p_raw_sc, t_raw_sc)
 
             yield p, t
+
+            self.write(_REG_MEAS_CFG, _REG_MEAS_CFG_MEAS_CTRL_BKG_PT)
+
+    def bkg_mode_measure_fifo(self, # pylint: disable=too-many-locals
+                         prs_rates=_DEFAULT_PRS_RATES,
+                         tmp_rates=_DEFAULT_TMP_RATES,
+                         interrupts=False,
+                         wait=None):
+        """ Measures temperature in background mode """
+        alarm = self.__configure_bkg_measurement(prs_rates, tmp_rates, interrupts, True, wait)
+
+        p_raw_sc, p, t_raw_sc, t = None, None, None, None
+
+        self.write(_REG_MEAS_CFG, _REG_MEAS_CFG_MEAS_CTRL_BKG_PT)
+
+        for _, _, dt in alarm:
+            cfg = None
+            int_sts = None
+            if self.__clear_interrupt:
+                cfg = self.read(_REG_MEAS_CFG)
+                int_sts = self.read(_REG_INT_STS)
+
+            data = self.read(_REG_BLOCK_PRS)
+            if data == _FIFO_EMPTY:
+                if self.__clear_interrupt:
+                    print(f'M ({dt*1e3:.2f} ms) - FIFO is empty')
+                    print(f'\tINT_STS:  {self.__str_int_sts(int_sts)}\n'
+                          f'\tMEAS_CFG: {self.__str_meas_cfg(cfg)}')
+                yield None
+            else:
+                print(f'M ({dt*1e3:.2f} ms)')
+                while data != _FIFO_EMPTY:
+                    if data[-1] & _FIFO_LSB:
+                        p_raw_sc = self.__calculate_prs(data)
+
+                    if not data[-1] & _FIFO_LSB:
+                        t_raw_sc = self.__calculate_tmp(data)
+                        t = self.__c.t(t_raw_sc)
+
+                    if p_raw_sc is not None and t_raw_sc is not None:
+                        p = self.__c.p(p_raw_sc, t_raw_sc)
+
+                    yield p, t
+
+                    data = self.read(_REG_BLOCK_PRS)
+
+                if self.__clear_interrupt:
+                    print(f'\tINT_STS:  {self.__str_int_sts(int_sts)}\n'
+                          f'\tMEAS_CFG: {self.__str_meas_cfg(cfg)}')
 
             self.write(_REG_MEAS_CFG, _REG_MEAS_CFG_MEAS_CTRL_BKG_PT)

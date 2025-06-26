@@ -98,9 +98,14 @@ def make_args_paraser():
 
     parser.add_argument(
             '--pressure-calibration-tmp', type=float,
-            help='Temperature for pressure sensor calibration in °C (default: show uncalibrated ' \
-                 'value)',
+            help='Temperature for pressure sensor calibration in °C (used only in "P" mode, ' \
+                 'default: show uncalibrated value)',
             metavar='TEMP'
+        )
+
+    parser.add_argument(
+            '--pressure-fifo', action='store_true', default=False,
+            help='Use FIFO (implemented only for "P+T" background mode measurement)'
         )
 
     return parser
@@ -173,6 +178,14 @@ def prs_start_measurement(sensor, args, wait):
 
 def prs_start_bkg_measurement(sensor, args, wait):
     """ Starts the pressure measurement """
+    if args.pressure_fifo:
+        return sensor.bkg_mode_measure_fifo(
+            prs_rates=(args.pressure_prs_rate, args.pressure_prs_oversampling),
+            tmp_rates=(args.pressure_tmp_rate, args.pressure_tmp_oversampling),
+            interrupts=wait is not None,
+            wait=wait,
+        )
+
     return sensor.bkg_mode_measure(
             prs_rates=(args.pressure_prs_rate, args.pressure_prs_oversampling),
             tmp_rates=(args.pressure_tmp_rate, args.pressure_tmp_oversampling),
