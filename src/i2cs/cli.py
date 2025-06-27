@@ -10,6 +10,7 @@ import gpiozero
 from .signal import Signal
 from .bus import i2c
 from .spl07_003 import Spl07003, DEFAULT_ADDRESS, Rate, Oversampling
+from .ens210 import ENS210
 
 def _based_int(s):
     """ Converts a string to an integer, or raises an exception """
@@ -131,39 +132,47 @@ def main():
     led = gpiozero.LED(args.led) if args.led is not None else _MockLed()
 
     values = _PRESSURE_VALUES[args.pressure_background_mode]
-    start_measurement, print_measurement = values[args.pressure_values]
-    print_measurement = print_measurement[args.pressure_calibration_tmp is None]
+    start_prs_meas, print_prs_meas = values[args.pressure_values]
+    print_prs_meas = print_prs_meas[args.pressure_calibration_tmp is None]
 
     with i2c() as bus:
-        with Spl07003(bus, args.pressure_address) as ps:
-            ps.reset()
+        with ENS210(bus) as rhs:
+            with Spl07003(bus, args.pressure_address) as ps:
+                part, rev, uid = rhs.read_ids()
+                print(f'ID: {part:04x}, REV: {rev:04x}, UID: {uid:016x}')
 
-            calibration = ps.read_coef()
-            print(f'{calibration}')
+                ps.reset()
 
-            count = 0
-            measurement = start_measurement(ps, args, wait)
-            if args.pressure_background_mode:
-                while not s.is_signaled() and count < args.limit:
-                    led.on()
-                    try:
-                        result = next(measurement)
-                    finally:
-                        led.off()
-                    count += 1
-                    if result is not None:
-                        print_measurement(count, result)
-            else:
-                while count < args.limit:
-                    led.on()
-                    try:
-                        result = next(measurement)
-                    finally:
-                        led.off()
-                    count += 1
-                    print_measurement(count, result)
-                    if s.wait(1):
-                        break
+                calibration = ps.read_coef()
+                print(f'{calibration}')
+
+                count = 0
+                prs_meas = start_prs_meas(ps, args, wait)
+                if args.pressure_background_mode:
+                    while not s.is_signaled() and (args.limit is None or count < args.limit):
+                        led.on()
+                        try:
+                            result = next(prs_meas)
+                        finally:
+                            led.off()
+                        count += 1
+                        if result is not None:
+                            print_prs_meas(count, result)
+                else:
+                    while args.limit is None or count < args.limit:
+                        led.on()
+                        try:
+                            result = next(prs_meas)
+                            t, h = rhs.measure()
+                        finally:
+                            led.off()
+                        count += 1
+                        print_prs_meas(count, result)
+                        now = datetime.datetime.now()
+                        print(f'{now.strftime("%x %X.%f")} {count}: ' \
+                              f'Temp: {t:.2f} C, Hum: {h:.2f} %')
+                        if s.wait(1):
+                            break
 
     return 0
 
